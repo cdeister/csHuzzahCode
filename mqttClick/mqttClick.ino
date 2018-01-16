@@ -1,88 +1,145 @@
+// Libraries
+#include <ESP8266WiFi.h>
+#include "Adafruit_MQTT.h"
+#include "Adafruit_MQTT_Client.h"
 
+// Lamp pin
+const int expanderPin = 14;
 
-#include <adafruit_aio.h>
-
-#define WLAN_SSID         "CloudyBrain"
+// WiFi parameters
+#define WLAN_SSID         "cloudybrain"
 #define WLAN_PASS         "333stamp"
 
+// Adafruit IO
+#define AIO_SERVER      "io.adafruit.com"
+#define AIO_SERVERPORT  1883
 #define AIO_USERNAME      "cdeister"
 #define AIO_KEY           "d388540dc18242eabf04f54fd9993b5f"
 
 
-#define BUTTONFEED     "ci01_solenoid"
-#define ONOFF_FEED         "onoff"
-#define USE_TLS             0
+// Functions
+void connect();
 
+// Create an ESP8266 WiFiClient class to connect to the MQTT server.
+WiFiClient client;
 
-AdafruitAIO       aio(AIO_USERNAME, AIO_KEY);
-AdafruitAIOFeed   photocell (&aio, BUTTONFEED);
+// Store the MQTT server, client ID, username, and password in flash memory.
+// This is required for using the Adafruit MQTT library.
+const char MQTT_SERVER[] PROGMEM    = AIO_SERVER;
+// Set a unique MQTT client ID using the AIO key + the date and time the sketch
+// was compiled (so this should be unique across multiple devices for a user,
+// alternatively you can manually set this to a GUID or other random value).
+const char MQTT_CLIENTID[] PROGMEM  = AIO_KEY __DATE__ __TIME__;
+const char MQTT_USERNAME[] PROGMEM  = AIO_USERNAME;
+const char MQTT_PASSWORD[] PROGMEM  = AIO_KEY;
 
-// button state
-bool current = false;
-bool last = false;
+// Setup the MQTT client class by passing in the WiFi client and MQTT server and login details.
+Adafruit_MQTT_Client mqtt(&client, MQTT_SERVER, AIO_SERVERPORT, MQTT_CLIENTID, MQTT_USERNAME, MQTT_PASSWORD);
 
-// set up the 'digital' feed
-AdafruitIO_Feed *digital = io.feed("ci01_solenoid");
+/****************************** Feeds ***************************************/
+
+// Setup a feed called 'lamp' for subscribing to changes.
+// Notice MQTT paths for AIO follow the form: <username>/feeds/<feedname>
+const char expanderFeed[] PROGMEM = AIO_USERNAME "/feeds/2P_BeamExpander";
+Adafruit_MQTT_Subscribe expander = Adafruit_MQTT_Subscribe(&mqtt, expanderFeed);
+
+/*************************** Sketch Code ************************************/
 
 void setup() {
 
-  // set button pin as an input
-  pinMode(LED_BUILTIN, INPUT);
+  // Set lamp pin to output
+  pinMode(expanderPin, OUTPUT);
 
   Serial.begin(115200);
-  delay(1);
 
-  while ( !connectAP() ) {
-    delay(500); // delay between each attempt
+  Serial.println(F("A"));
+
+  // Connect to WiFi access point.
+  Serial.println(); Serial.println();
+  delay(10);
+  Serial.print(F("Connecting to "));
+  Serial.println(WLAN_SSID);
+
+  WiFi.begin(WLAN_SSID, WLAN_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(F("."));
   }
+  Serial.println();
 
-  // Tell the MQTT client to auto print error codes and halt on errors
-  aio.err_actions(true, true);
+  Serial.println(F("WiFi connected"));
+  Serial.println(F("IP address: "));
+  Serial.println(WiFi.localIP());
 
-  // Set ClientID if defined
-#ifdef CLIENTID
-  aio.clientID(CLIENTID);
-#endif
+  // listen for events on the lamp feed
+  mqtt.subscribe(&expander);
 
-  if ( USE_TLS )
-  {
-    aio.connectSSL(); // Will halted if an error occurs
-  } else
-  {
-    aio.connect(); // Will halted if an error occurs
-  }
-  Serial.println("OK");
+  // connect to adafruit io
+  connect();
 
-  // 'Follow' the onoff feed to capture any state changes
-  onoff.follow(feed_callback);
 }
 
 void loop() {
 
-  // io.run(); is required for all sketches.
-  // it should always be present at the top of your loop
-  // function. it keeps the client connected to
-  // io.adafruit.com, and processes any incoming data.
-  io.run();
+  Adafruit_MQTT_Subscribe *subscription;
 
-  // grab the current state of the button.
-  // we have to flip the logic because we are
-  // using a pullup resistor.
-  if (digitalRead(LED_BUILTIN) == LOW)
-    current = true;
-  else
-    current = false;
+  // ping adafruit io a few times to make sure we remain connected
+  if(! mqtt.ping(3)) {
+    // reconnect to adafruit io
+    if(! mqtt.connected())
+      connect();
+  }
 
-  // return if the value hasn't changed
-  if (current == last)
-    return;
+  // this is our 'wait for incoming subscription packets' busy subloop
+  while (subscription = mqtt.readSubscription(1000)) {
 
-  // save the current state to the 'digital' feed on adafruit io
-  Serial.print("sending button -> ");
-  Serial.println(current);
-  digital->save(current);
+    // we only care about the lamp events
+    if (subscription == &expander) {
 
-  // store last button state
-  last = current;
+      // convert mqtt ascii payload to int
+      char *value = (char *)expander.lastread;
+      Serial.print(F("Received: "));
+      Serial.println(value);
+
+      // Apply message to lamp
+      String message = String(value);
+      message.trim();
+      if (message == "ON") {digitalWrite(expanderPin, HIGH);}
+      if (message == "OFF") {digitalWrite(expanderPin, LOW);}
+
+    }
+
+  }
+
+}
+
+// connect to adafruit io via MQTT
+void connect() {
+
+  Serial.print(F("Connecting to Adafruit IO... "));
+
+  int8_t ret;
+
+  while ((ret = mqtt.connect()) != 0) {
+
+    switch (ret) {
+      case 1: Serial.println(F("Wrong protocol")); break;
+      case 2: Serial.println(F("ID rejected")); break;
+      case 3: Serial.println(F("Server unavail")); break;
+      case 4: Serial.println(F("Bad user/pass")); break;
+      case 5: Serial.println(F("Not authed")); break;
+      case 6: Serial.println(F("Failed to subscribe")); break;
+      default: Serial.println(F("Connection failed")); break;
+    }
+
+    if(ret >= 0)
+      mqtt.disconnect();
+
+    Serial.println(F("Retrying connection..."));
+    delay(5000);
+
+  }
+
+  Serial.println(F("Adafruit IO Connected!"));
 
 }
