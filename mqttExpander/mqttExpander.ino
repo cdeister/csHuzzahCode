@@ -67,6 +67,7 @@ void loop() {
     Serial.print("Humidity:    "); Serial.print(sensor.readHumidity(), 2);
     Serial.print("\tTemperature: "); Serial.println(sensor.readTemperature(), 2);
     humidity->save(sensor.readHumidity());
+    temp->save(sensor.readTemperature());
     pollTH = 0;
   }
 }
@@ -95,6 +96,7 @@ void handleTrigger(int trigPin, int writePin) {
     digitalWrite(writePin, newState);
   }
   expanderState=newState;
+
 }
 
 
